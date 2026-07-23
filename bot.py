@@ -1,13 +1,14 @@
 import os
 import asyncio
+import time
 import logging
 from datetime import datetime
 from pathlib import Path
-import psutil
+from aiohttp import web
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from pyrogram.enums import MessageMediaType
 
 from config import Config
 from utils.subtitle_processor import SubtitleProcessor
@@ -21,363 +22,200 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class SubtitleBot:
-    def __init__(self):
-        self.config = Config()
-        self.config.setup_directories()
-        self.processor = SubtitleProcessor(self.config)
-        self.file_handler = FileHandler(self.config)
-        self.user_data = {}
-        
-        self.system_info = {
-            'total_memory': psutil.virtual_memory().total / 1024 / 1024 / 1024,
-            'available_memory': psutil.virtual_memory().available / 1024 / 1024 / 1024,
-            'cpu_count': psutil.cpu_count()
-        }
-    
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        await self.file_handler.start()
-        welcome_message = (
-            f"👋 **Hello {user.first_name}!**\n\n"
-            "🎬 **Welcome to the Subtitle Burner Bot!**\n\n"
-            "I can permanently burn subtitles into your videos.\n\n"
-            "**📤 How to use:**\n"
-            "1️⃣ Send me a **video file** (MP4, MKV, AVI, etc. - up to 2GB)\n"
-            "2️⃣ Then send me a **subtitle file** (.srt, .ass, .ssa, .vtt)\n"
-            "3️⃣ I'll burn the subtitles and send you the processed video\n\n"
-            f"📊 **System:** {self.system_info['cpu_count']} cores, {self.system_info['available_memory']:.1f}GB RAM\n\n"
-            "Send a video to get started! 🚀"
-        )
-        await update.message.reply_text(welcome_message, parse_mode=ParseMode.MARKDOWN)
-    
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = (
-            "📖 **How to use**\n\n"
-            "1️⃣ Send a **video file** (mp4, mkv, avi, etc.)\n"
-            "2️⃣ Send a **subtitle file** (.srt, .ass, .ssa, .vtt)\n"
-            "3️⃣ Receive your video with hard-burned subtitles!\n\n"
-            "**Commands:**\n"
-            "/start - Start\n/help - Help\n/status - Bot status\n/cancel - Cancel"
-        )
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
-    
-    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        active_jobs = self.processor.get_all_jobs()
-        status_text = (
-            f"📊 **Bot Status**\n\n✅ Running\n"
-            f"⚡ Preset: `{self.config.ENCODING_PRESET}`\n"
-            f"🔢 Threads: {self.config.FFMPEG_THREADS}\n"
-            f"🎬 Active jobs: {len(active_jobs)}\n"
-            f"💾 Memory: {self.system_info['available_memory']:.1f}GB / {self.system_info['total_memory']:.1f}GB"
-        )
-        await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
-    
-    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if user_id in self.user_data:
-            self.user_data[user_id] = {}
-            await update.message.reply_text("🔄 Cancelled.")
-        else:
-            await update.message.reply_text("ℹ️ No active operation.")
-    
-    async def handle_video_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handles both video messages and document messages that are actually videos."""
-        user_id = update.effective_user.id
-        user_data = self.user_data.get(user_id, {})
-        
-        video = None
-        file_name = None
-        file_size = 0
-        file_id = None
-        detected = False
-        
-        # 1. Check if it's a video message
-        if update.message.video:
-            video = update.message.video
-            file_name = video.file_name or f"video_{user_id}.mp4"
-            file_size = video.file_size
-            file_id = video.file_id
-            detected = True
-            logger.info(f"📹 Video message detected: {file_name}")
-        
-        # 2. Check if it's a document
-        elif update.message.document:
-            doc = update.message.document
-            doc_name = doc.file_name or ""
-            doc_ext = Path(doc_name).suffix.lower()
-            mime = doc.mime_type or ""
-            
-            logger.info(f"📄 Document received: name='{doc_name}', ext='{doc_ext}', mime='{mime}'")
-            
-            # Check if it's a video by mime_type or extension
-            is_video_mime = mime.startswith('video/')
-            is_video_ext = doc_ext in self.config.SUPPORTED_VIDEO_FORMATS
-            
-            if is_video_mime or is_video_ext:
-                video = doc
-                file_name = doc_name if doc_name else f"video_{user_id}{doc_ext or '.mp4'}"
-                file_size = doc.file_size
-                file_id = doc.file_id
-                detected = True
-                logger.info(f"🎬 Document recognized as video: {file_name}")
-            else:
-                if doc_ext in self.config.SUPPORTED_SUB_FORMATS:
-                    return await self.handle_subtitle_input(update, context)
-                else:
-                    await update.message.reply_text(
-                        f"❌ **Unsupported file format!**\n\n"
-                        f"File: `{doc_name}`\n"
-                        f"Extension: `{doc_ext}`\n\n"
-                        f"Send a video (MP4, MKV, AVI, etc.) or subtitle (.srt, .ass, .vtt)."
-                    )
-                    return
-        
-        if not detected:
-            await update.message.reply_text(
-                "❌ **Please send a video file!**\n\n"
-                "Send a video file (MP4, MKV, AVI, etc.) first.\n"
-                "Then send the subtitle file."
-            )
-            return
-        
-        # Check file size
-        if file_size > self.config.MAX_FILE_SIZE:
-            await update.message.reply_text(
-                f"❌ **File too large!** ({file_size/1024/1024/1024:.2f}GB)\nMax: 2GB"
-            )
-            return
-        
-        # Store video info
-        user_data['video_file'] = video
-        user_data['video_file_id'] = file_id
-        user_data['video_name'] = file_name
-        user_data['video_size'] = file_size
-        self.user_data[user_id] = user_data
-        
-        await update.message.reply_text(
-            f"✅ **Video received!**\n\n"
-            f"📹 File: `{file_name}`\n"
-            f"📦 Size: {file_size/1024/1024:.1f}MB\n\n"
-            "📝 Now send me the **subtitle file**\n"
-            "(.srt, .ass, .ssa, .vtt)\n\n"
-            "⚠️ Send it as a **document** (file attachment)."
-        )
-    
-    async def handle_subtitle_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        # Check if video was stored
-        if user_id not in self.user_data or 'video_file' not in self.user_data[user_id]:
-            await update.message.reply_text(
-                "❌ **Please send a video first!**\n\n"
-                "1️⃣ Send a video file (MP4, MKV, AVI, etc.)\n"
-                "2️⃣ Then send the subtitle file"
-            )
-            return
-        
-        doc = update.message.document
-        if not doc:
-            await update.message.reply_text("❌ Please send a subtitle file as a document.")
-            return
-        
-        file_name = doc.file_name or ""
-        file_ext = Path(file_name).suffix.lower()
-        
-        # Check if it's a video document
-        if file_ext in self.config.SUPPORTED_VIDEO_FORMATS or (doc.mime_type and doc.mime_type.startswith('video/')):
-            return await self.handle_video_input(update, context)
-        
-        # Check subtitle format
-        if file_ext not in self.config.SUPPORTED_SUB_FORMATS:
-            await update.message.reply_text(
-                f"❌ **Unsupported subtitle format!**\n\n"
-                f"File: `{file_name}`\n"
-                f"Extension: `{file_ext}`\n\n"
-                f"Supported: {', '.join(self.config.SUPPORTED_SUB_FORMATS)}"
-            )
-            return
-        
-        if doc.file_size > self.config.MAX_SUBTITLE_SIZE:
-            await update.message.reply_text(
-                f"❌ **Subtitle too large!** ({doc.file_size/1024/1024:.1f}MB)\nMax: 50MB"
-            )
-            return
-        
-        # Proceed with processing
-        user_data = self.user_data[user_id]
-        video_file_id = user_data['video_file_id']
-        video_name = user_data['video_name']
-        
-        # Create progress message with initial status
-        progress_msg = await update.message.reply_text(
-            "📊 **Task Running: Initializing**\n\n"
-            "Starting processing...",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        job_dir = os.path.join(self.config.TEMP_DIR, f"job_{user_id}_{int(datetime.now().timestamp())}")
-        os.makedirs(job_dir, exist_ok=True)
-        
-        try:
-            await self.file_handler.start()
-            
-            # Determine video extension
-            video_ext = Path(video_name).suffix.lower()
-            if not video_ext or video_ext not in self.config.SUPPORTED_VIDEO_FORMATS:
-                video_ext = '.mp4'
-            video_path = os.path.join(job_dir, f"video_{user_id}{video_ext}")
-            subtitle_path = os.path.join(job_dir, file_name)
-            
-            # Create download progress manager
-            download_progress = ProgressManager(user_data['video_size'], f"download_{user_id}", "Downloading Video")
-            
-            # Download video with progress
-            async def dl_progress(curr, total):
-                if total > 0:
-                    percentage = int((curr / total) * 100)
-                    # Update download progress
-                    download_progress.processed_size = curr
-                    download_progress.total_size = total
-                    
-                    try:
-                        # Update message with download progress
-                        status_text = download_progress.get_progress_text()
-                        await progress_msg.edit_text(status_text, parse_mode=ParseMode.MARKDOWN)
-                    except Exception as e:
-                        logger.error(f"Error updating progress: {e}")
-            
-            # Start download
-            await self.file_handler.download_file(video_file_id, video_path, dl_progress)
-            
-            # Download subtitle
-            await progress_msg.edit_text(
-                "📥 **Downloading subtitle...**\n\n"
-                f"📦 Size: {doc.file_size/1024:.1f}KB",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await self.file_handler.download_file(doc.file_id, subtitle_path)
-            
-            # Process video with subtitles
-            await progress_msg.edit_text(
-                "🎬 **Burning subtitles...**\n\n"
-                "⏳ This may take a few minutes.\n"
-                "📊 Progress will update automatically...",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            # Create processing progress manager
-            processing_progress = ProgressManager(
-                os.path.getsize(video_path) + os.path.getsize(subtitle_path),
-                f"process_{user_id}",
-                "Burning Subtitles"
-            )
-            
-            async def enc_progress(percentage, speed, stage):
-                try:
-                    # Update processing progress
-                    processing_progress.processed_size = int(percentage / 100 * processing_progress.total_size)
-                    processing_progress.current_stage = stage
-                    status_text = processing_progress.get_progress_text()
-                    await progress_msg.edit_text(status_text, parse_mode=ParseMode.MARKDOWN)
-                except Exception as e:
-                    logger.error(f"Error updating encoding progress: {e}")
-            
-            output_path, progress = await self.processor.process_video(
-                video_path, subtitle_path,
-                output_name=f"hardsub_{user_id}_{int(datetime.now().timestamp())}.mp4",
-                job_id=f"job_{user_id}_{int(datetime.now().timestamp())}"
-            )
-            progress.callback = enc_progress
-            
-            # Wait for completion
-            while not progress.is_complete:
-                await asyncio.sleep(0.5)
-            
-            await progress_msg.edit_text(
-                "✅ **Processing complete!**\n\n📤 Uploading...",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            output_size = os.path.getsize(output_path)
-            
-            # Create upload progress manager
-            upload_progress = ProgressManager(output_size, f"upload_{user_id}", "Uploading Video")
-            
-            async def up_progress(curr, total):
-                if total > 0:
-                    upload_progress.processed_size = curr
-                    upload_progress.total_size = total
-                    try:
-                        status_text = upload_progress.get_progress_text()
-                        await progress_msg.edit_text(status_text, parse_mode=ParseMode.MARKDOWN)
-                    except Exception as e:
-                        logger.error(f"Error updating upload progress: {e}")
-            
-            # Send video to user
-            await self.file_handler.send_video_to_user(
-                chat_id=user_id,
-                video_path=output_path,
-                caption=(
-                    f"🎬 **Video with Hard-Burned Subtitles**\n\n"
-                    f"✅ Subtitles permanently burned in!\n"
-                    f"⚡ Ultra-fast processing\n"
-                    f"📦 {output_size/1024/1024:.1f}MB\n"
-                    f"⏱️ {progress.get_elapsed_time()}"
-                ),
-                progress_callback=up_progress
-            )
-            
-            await self.processor.cleanup(job_dir)
-            self.user_data.pop(user_id, None)
-            
-            await progress_msg.edit_text(
-                f"✅ **Done!**\n\n⏱️ Total time: {progress.get_elapsed_time()}\n\nSend another video to continue!"
-            )
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Processing error: {error_msg}")
-            
-            await progress_msg.edit_text(
-                f"❌ **Error:**\n\n"
-                f"`{error_msg[:300]}`\n\n"
-                f"**Tips:**\n"
-                f"• Make sure your video file is not corrupted\n"
-                f"• Try using .srt subtitle format\n"
-                f"• Try converting video to MP4 first\n"
-                f"• Make sure subtitle has correct timing",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            await self.processor.cleanup(job_dir)
-            self.user_data.pop(user_id, None)
+# Initialize
+config = Config()
+config.setup_directories()
+processor = SubtitleProcessor(config)
+file_handler = FileHandler(config)
 
+user_data = {}
+progress_messages = {}
+
+# --- Web Server for Health Checks ---
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+async def start_web_server():
+    server = web.Application()
+    server.router.add_get("/", health_check)
+    server.router.add_get("/health", health_check)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", config.PORT)
+    await site.start()
+    logger.info(f"✅ Web server on port {config.PORT}")
+
+# --- Progress Callback ---
+async def progress_callback(current, total, message, operation):
+    """Update progress message"""
+    try:
+        percentage = (current / total * 100) if total > 0 else 0
+        speed = current / (1024 * 1024) / max(1, time.time() - start_time) if 'start_time' in locals() else 0
+        
+        bar = '█' * int(percentage / 5) + '░' * (20 - int(percentage / 5))
+        
+        status_text = (
+            f"📊 **{operation}**\n\n"
+            f"`{bar}` **{percentage:.1f}%**\n\n"
+            f"📦 **Size:** {current / 1024 / 1024:.1f}MB / {total / 1024 / 1024:.1f}MB\n"
+        )
+        
+        await message.edit_text(status_text)
+    except Exception as e:
+        logger.error(f"Progress update error: {e}")
+
+# --- Bot Commands ---
+@Client.on_message(filters.command(["start", "help"]))
+async def start_command(client: Client, message: Message):
+    await message.reply_text(
+        "👋 **Fast Hardsub Bot**\n\n"
+        "1️⃣ Send me a **Video File** (up to 2GB)\n"
+        "2️⃣ Send me a **Subtitle File** (.srt, .ass, .vtt)\n"
+        "3️⃣ I'll burn subtitles and send back!\n\n"
+        "⚡ **Ultra-fast** with FFmpeg\n"
+        "📊 **Real-time progress**\n"
+        "🌍 **All languages supported**"
+    )
+
+@Client.on_message(filters.video | filters.document)
+async def handle_media(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # Check if it's a subtitle file
+    doc = message.document or message.video
+    if not doc:
+        return
+    
+    file_name = doc.file_name or "file.mp4"
+    file_ext = Path(file_name).suffix.lower()
+    
+    # If subtitle
+    if file_ext in config.SUPPORTED_SUB_FORMATS:
+        if user_id not in user_data or 'video_path' not in user_data[user_id]:
+            await message.reply_text("❌ Please send the video file first!")
+            return
+        
+        status_msg = await message.reply_text("📥 Downloading subtitle...")
+        
+        # Download subtitle
+        sub_path = os.path.join(config.TEMP_DIR, f"sub_{user_id}{file_ext}")
+        await message.download(file_name=sub_path)
+        
+        user_data[user_id]['sub_path'] = sub_path
+        
+        await status_msg.edit_text(
+            "✅ **Subtitle Received!**\n\n"
+            "🔄 Starting hardsub process...\n"
+            "⏳ This may take a few minutes."
+        )
+        
+        # Process video
+        await process_hardsub(client, message, user_id, status_msg)
+    
+    # If video
+    else:
+        status_msg = await message.reply_text("📥 Downloading video...")
+        
+        # Download video
+        video_path = os.path.join(config.TEMP_DIR, f"vid_{user_id}.mp4")
+        await message.download(file_name=video_path)
+        
+        user_data[user_id] = {
+            'video_path': video_path,
+            'video_size': doc.file_size
+        }
+        
+        await status_msg.edit_text(
+            "✅ **Video Downloaded!**\n\n"
+            "📝 Now send the **subtitle file**\n"
+            f"Supported: {', '.join(config.SUPPORTED_SUB_FORMATS)}"
+        )
+
+async def process_hardsub(client: Client, message: Message, user_id: int, status_msg: Message):
+    """Process hardsub with progress"""
+    try:
+        video_path = user_data[user_id]['video_path']
+        sub_path = user_data[user_id]['sub_path']
+        
+        # Output path
+        output_path = os.path.join(config.OUTPUT_DIR, f"output_{user_id}.mp4")
+        
+        # Update status
+        await status_msg.edit_text("🔥 **Burning subtitles...**\n\n⏳ Processing...")
+        
+        # Process with progress
+        progress = await processor.burn_subtitles(video_path, sub_path, output_path, "x264")
+        
+        # Create progress updater
+        async def update_progress():
+            last_text = ""
+            while not progress.is_complete:
+                await asyncio.sleep(2)
+                status_text = progress.get_status_text()
+                if status_text != last_text:
+                    try:
+                        await status_msg.edit_text(status_text)
+                        last_text = status_text
+                    except:
+                        pass
+        
+        # Start progress updates
+        await asyncio.gather(update_progress())
+        
+        # Upload result
+        await status_msg.edit_text("📤 **Uploading hardsubbed video...**")
+        
+        # Send video
+        await client.send_video(
+            chat_id=user_id,
+            video=output_path,
+            caption=f"✅ **Hardsub Complete!**\n\n⏱️ Time: {progress.get_elapsed_time()}\n📦 Size: {progress.format_size(os.path.getsize(output_path))}",
+            supports_streaming=True
+        )
+        
+        await status_msg.edit_text("✅ **Done!** Video with hard-burned subtitles sent!")
+        
+        # Cleanup
+        for path in [video_path, sub_path, output_path]:
+            if os.path.exists(path):
+                os.remove(path)
+        
+        if user_id in user_data:
+            del user_data[user_id]
+            
+    except Exception as e:
+        logger.error(f"Processing error: {e}")
+        await status_msg.edit_text(f"❌ **Error:** {str(e)[:200]}\n\nPlease try again.")
+
+# --- Run Bot ---
 async def main():
-    bot = SubtitleBot()
-    app = Application.builder().token(Config.BOT_TOKEN).build()
+    # Create app
+    app = Client(
+        "hardsub_bot",
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN
+    )
     
-    app.add_handler(CommandHandler("start", bot.start))
-    app.add_handler(CommandHandler("help", bot.help_command))
-    app.add_handler(CommandHandler("status", bot.status_command))
-    app.add_handler(CommandHandler("cancel", bot.cancel_command))
+    # Register handlers
+    app.on_message(filters.command(["start", "help"]))(start_command)
+    app.on_message(filters.video | filters.document)(handle_media)
     
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, bot.handle_video_input))
+    # Start web server
+    await start_web_server()
     
-    print("🚀 Bot started!")
-    await app.initialize()
+    # Start bot
+    logger.info("🚀 Starting bot...")
     await app.start()
-    await app.updater.start_polling()
+    logger.info("✅ Bot is running!")
     
+    # Keep running
     try:
         while True:
             await asyncio.sleep(1)
     except KeyboardInterrupt:
-        print("🛑 Shutting down...")
-    finally:
-        await app.updater.stop()
+        logger.info("🛑 Shutting down...")
         await app.stop()
-        await app.shutdown()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
