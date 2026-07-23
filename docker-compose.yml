@@ -2,17 +2,13 @@ version: '3.8'
 
 services:
   telegram-bot:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: subtitle-bot
     environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - API_ID=${API_ID}
-      - API_HASH=${API_HASH}
-      - MAX_FILE_SIZE=2147483648
-      - TEMP_DIR=/app/temp
+      - PYTHONUNBUFFERED=1
       - FFMPEG_THREADS=4
-      - ENCODING_PRESET=ultrafast
-      - BOT_SESSION=subtitle_bot
     volumes:
       - ./temp:/app/temp
       - ./sessions:/app/sessions
@@ -30,4 +26,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    network_mode: bridge
