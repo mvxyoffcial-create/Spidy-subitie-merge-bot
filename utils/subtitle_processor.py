@@ -20,6 +20,19 @@ class SubtitleProcessor:
         # Processing queue
         self.active_jobs = {}
         self.job_counter = 0
+        
+        # Check if FFmpeg is available
+        self._check_ffmpeg()
+    
+    def _check_ffmpeg(self):
+        """Check if FFmpeg is installed and working"""
+        try:
+            result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception("FFmpeg is not installed or not working")
+            print(f"✅ FFmpeg version: {result.stdout.splitlines()[0]}")
+        except FileNotFoundError:
+            raise Exception("FFmpeg not found. Please install FFmpeg.")
     
     async def process_video(self, video_path: str, subtitle_path: str, 
                            output_name: str = None, job_id: str = None) -> Tuple[str, ProgressManager]:
@@ -80,8 +93,23 @@ class SubtitleProcessor:
         """
         progress.set_stage("Preparing FFmpeg")
         
-        # Prepare subtitle filter
-        subtitle_filter = f"subtitles={subtitle_path}:force_style='Fontsize=24,OutlineColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=20'"
+        # Fix subtitle path for FFmpeg (escape special characters)
+        subtitle_path_escaped = subtitle_path.replace("'", "'\\''")
+        
+        # Prepare subtitle filter with better styling
+        subtitle_filter = (
+            f"subtitles='{subtitle_path_escaped}':"
+            f"force_style='Fontsize=22,"
+            f"OutlineColour=&H80000000,"
+            f"BorderStyle=4,"
+            f"Outline=2,"
+            f"Shadow=1,"
+            f"MarginV=30,"
+            f"FontName=Arial,"
+            f"PrimaryColour=&H00FFFFFF,"
+            f"SecondaryColour=&H00FFFF00,"
+            f"FontBold=1'"
+        )
         
         # Build FFmpeg command for ultra-fast processing
         cmd = [
@@ -101,9 +129,15 @@ class SubtitleProcessor:
             output_path
         ]
         
+        print(f"🎬 Running FFmpeg command: {' '.join(cmd)}")
+        
         # Update progress stage
         progress.set_stage("Encoding video")
         await progress.update(0, "Encoding video")
+        
+        # Get total duration for accurate progress
+        total_duration = await self._get_video_duration(video_path)
+        print(f"📹 Video duration: {total_duration} seconds")
         
         # Start FFmpeg process
         process = await asyncio.create_subprocess_exec(
@@ -112,22 +146,27 @@ class SubtitleProcessor:
             stderr=asyncio.subprocess.PIPE
         )
         
-        # Get total duration for accurate progress
-        total_duration = await self._get_video_duration(video_path)
         last_progress = 0
         
         # Read progress from FFmpeg output
+        stderr_lines = []
+        
         while True:
+            # Read stderr for progress
             line = await process.stderr.readline()
             if not line:
                 break
             
-            line = line.decode('utf-8', errors='ignore').strip()
+            line_str = line.decode('utf-8', errors='ignore').strip()
+            stderr_lines.append(line_str)
+            
+            # Print debug info
+            print(f"FFmpeg: {line_str}")
             
             # Parse FFmpeg progress
-            if 'out_time=' in line:
+            if 'out_time=' in line_str:
                 try:
-                    time_str = line.split('=')[1].strip()
+                    time_str = line_str.split('=')[1].strip()
                     if ':' in time_str:
                         # Parse time in HH:MM:SS.milliseconds format
                         parts = time_str.split(':')
@@ -145,27 +184,36 @@ class SubtitleProcessor:
                                     bytes_processed = int((progress_percent - last_progress) / 100 * progress.total_size)
                                     await progress.update(bytes_processed, "Encoding video")
                                     last_progress = progress_percent
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Error parsing time: {e}")
             
-            # Look for other progress indicators
-            elif 'frame=' in line and 'fps=' in line:
-                # This indicates active processing
-                if progress.get_percentage() < 50:  # If still early in processing
-                    # Simulate progress for large files where FFmpeg progress might not be reliable
-                    await progress.update(1024 * 1024, "Processing")  # 1MB chunks
-                    await asyncio.sleep(0.01)  # Prevent excessive CPU usage
+            # Check for errors
+            if 'error' in line_str.lower() or 'failed' in line_str.lower():
+                print(f"⚠️ FFmpeg error: {line_str}")
         
         # Wait for process to complete
         await process.wait()
         
+        # Check if FFmpeg failed
         if process.returncode != 0:
-            stderr = await process.stderr.read()
-            error_msg = stderr.decode('utf-8', errors='ignore')
-            raise Exception(f"FFmpeg encoding failed: {error_msg}")
+            # Get stderr output
+            stderr_text = '\n'.join(stderr_lines)
+            print(f"❌ FFmpeg failed with return code: {process.returncode}")
+            print(f"Stderr output: {stderr_text}")
+            
+            # Check for specific errors
+            if 'Permission denied' in stderr_text:
+                raise Exception(f"FFmpeg permission error: {stderr_text[:200]}")
+            elif 'No such file' in stderr_text:
+                raise Exception(f"FFmpeg file not found: {stderr_text[:200]}")
+            elif 'Invalid argument' in stderr_text:
+                raise Exception(f"FFmpeg invalid argument: {stderr_text[:200]}")
+            else:
+                raise Exception(f"FFmpeg encoding failed:\n{stderr_text[:500]}")
         
         # Ensure progress is at 100%
         progress.complete()
+        print("✅ FFmpeg encoding completed successfully")
     
     async def _get_video_duration(self, video_path: str) -> float:
         """Get video duration in seconds using FFprobe"""
@@ -187,12 +235,21 @@ class SubtitleProcessor:
             stdout, stderr = await process.communicate()
             
             if process.returncode == 0:
-                duration = float(stdout.decode().strip())
-                return duration
-            else:
-                return 0
-        except:
+                duration_str = stdout.decode().strip()
+                if duration_str:
+                    return float(duration_str)
             return 0
+        except Exception as e:
+            print(f"Error getting duration: {e}")
+            return 0
+    
+    def get_job_progress(self, job_id: str) -> Optional[ProgressManager]:
+        """Get progress for a specific job"""
+        return self.active_jobs.get(job_id)
+    
+    def get_all_jobs(self) -> dict:
+        """Get all active jobs"""
+        return self.active_jobs.copy()
     
     async def cleanup(self, *paths):
         """Clean up temporary files"""
@@ -201,11 +258,9 @@ class SubtitleProcessor:
                 try:
                     if os.path.isfile(path):
                         os.remove(path)
+                        print(f"🧹 Cleaned up file: {path}")
                     elif os.path.isdir(path):
                         shutil.rmtree(path)
+                        print(f"🧹 Cleaned up directory: {path}")
                 except Exception as e:
                     print(f"Cleanup error for {path}: {e}")
-    
-    def get_job_progress(self, job_id: str) -> Optional[ProgressManager]:
-        """Get progress for a specific job"""
-        return self.active_jobs.get(job_id)
