@@ -1,21 +1,30 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install FFmpeg and dependencies
+# Install FFmpeg and dependencies with full codec support
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    libavcodec-extra \
+    libavformat-extra \
+    libavfilter-extra \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
-# Create directories for temporary files
-RUN mkdir -p temp input output
+# Create necessary directories
+RUN mkdir -p temp/input temp/output temp/cache
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV TEMP_DIR=/app/temp
 
 # Run the bot
 CMD ["python", "bot.py"]
