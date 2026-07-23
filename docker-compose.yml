@@ -6,15 +6,23 @@ services:
     container_name: subtitle-bot
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - MAX_FILE_SIZE=2147483648  # 2GB in bytes
+      - MAX_FILE_SIZE=2147483648
       - TEMP_DIR=/app/temp
+      - FFMPEG_THREADS=4
+      - ENCODING_PRESET=ultrafast
     volumes:
       - ./temp:/app/temp
-      - ./input:/app/input
-      - ./output:/app/output
     restart: unless-stopped
     deploy:
       resources:
         limits:
+          cpus: '4'
+          memory: 6G
+        reservations:
           cpus: '2'
-          memory: 4G
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
