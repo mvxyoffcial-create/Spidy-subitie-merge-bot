@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     libavcodec-extra \
     libavformat-extra \
     libavfilter-extra \
+    wget \
+    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,6 +27,7 @@ RUN mkdir -p temp/input temp/output temp/cache
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV TEMP_DIR=/app/temp
+ENV TZ=UTC
 
 # Run the bot
 CMD ["python", "bot.py"]
