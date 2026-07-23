@@ -209,9 +209,10 @@ class SubtitleBot:
         video_file_id = user_data['video_file_id']
         video_name = user_data['video_name']
         
+        # Create progress message with initial status
         progress_msg = await update.message.reply_text(
-            "🔄 **Starting processing...**\n\n"
-            "📥 Downloading files...",
+            "📊 **Task Running: Initializing**\n\n"
+            "Starting processing...",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -228,52 +229,59 @@ class SubtitleBot:
             video_path = os.path.join(job_dir, f"video_{user_id}{video_ext}")
             subtitle_path = os.path.join(job_dir, file_name)
             
-            # Download video
-            async def dl_progress(curr, total):
-                pct = int((curr/total)*100) if total > 0 else 0
-                if pct % 10 == 0:
-                    try:
-                        await progress_msg.edit_text(
-                            f"📥 **Downloading video...**\n\n"
-                            f"📊 {pct}%\n"
-                            f"📦 {curr/1024/1024:.1f}MB / {total/1024/1024:.1f}MB",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                    except:
-                        pass
+            # Create download progress manager
+            download_progress = ProgressManager(user_data['video_size'], f"download_{user_id}", "Downloading Video")
             
-            await progress_msg.edit_text(
-                f"📥 **Downloading video...**\n"
-                f"📦 {user_data['video_size']/1024/1024:.1f}MB",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            # Download video with progress
+            async def dl_progress(curr, total):
+                if total > 0:
+                    percentage = int((curr / total) * 100)
+                    # Update download progress
+                    download_progress.processed_size = curr
+                    download_progress.total_size = total
+                    
+                    try:
+                        # Update message with download progress
+                        status_text = download_progress.get_progress_text()
+                        await progress_msg.edit_text(status_text, parse_mode=ParseMode.MARKDOWN)
+                    except Exception as e:
+                        logger.error(f"Error updating progress: {e}")
+            
+            # Start download
             await self.file_handler.download_file(video_file_id, video_path, dl_progress)
             
             # Download subtitle
             await progress_msg.edit_text(
-                f"📥 **Downloading subtitle...**\n"
-                f"📦 {doc.file_size/1024:.1f}KB",
+                "📥 **Downloading subtitle...**\n\n"
+                f"📦 Size: {doc.file_size/1024:.1f}KB",
                 parse_mode=ParseMode.MARKDOWN
             )
             await self.file_handler.download_file(doc.file_id, subtitle_path)
             
-            # Process
+            # Process video with subtitles
             await progress_msg.edit_text(
                 "🎬 **Burning subtitles...**\n\n"
-                "⏳ This may take a few minutes.",
+                "⏳ This may take a few minutes.\n"
+                "📊 Progress will update automatically...",
                 parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Create processing progress manager
+            processing_progress = ProgressManager(
+                os.path.getsize(video_path) + os.path.getsize(subtitle_path),
+                f"process_{user_id}",
+                "Burning Subtitles"
             )
             
             async def enc_progress(percentage, speed, stage):
                 try:
-                    await progress_msg.edit_text(
-                        f"🔄 **{stage}**\n\n"
-                        f"📊 {percentage}%\n"
-                        f"⚡ {speed:.1f} MB/s",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except:
-                    pass
+                    # Update processing progress
+                    processing_progress.processed_size = int(percentage / 100 * processing_progress.total_size)
+                    processing_progress.current_stage = stage
+                    status_text = processing_progress.get_progress_text()
+                    await progress_msg.edit_text(status_text, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    logger.error(f"Error updating encoding progress: {e}")
             
             output_path, progress = await self.processor.process_video(
                 video_path, subtitle_path,
@@ -282,6 +290,7 @@ class SubtitleBot:
             )
             progress.callback = enc_progress
             
+            # Wait for completion
             while not progress.is_complete:
                 await asyncio.sleep(0.5)
             
@@ -292,25 +301,20 @@ class SubtitleBot:
             
             output_size = os.path.getsize(output_path)
             
+            # Create upload progress manager
+            upload_progress = ProgressManager(output_size, f"upload_{user_id}", "Uploading Video")
+            
             async def up_progress(curr, total):
-                pct = int((curr/total)*100) if total > 0 else 0
-                if pct % 10 == 0:
+                if total > 0:
+                    upload_progress.processed_size = curr
+                    upload_progress.total_size = total
                     try:
-                        await progress_msg.edit_text(
-                            f"📤 **Uploading...**\n\n"
-                            f"📊 {pct}%\n"
-                            f"📦 {curr/1024/1024:.1f}MB / {total/1024/1024:.1f}MB",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                    except:
-                        pass
+                        status_text = upload_progress.get_progress_text()
+                        await progress_msg.edit_text(status_text, parse_mode=ParseMode.MARKDOWN)
+                    except Exception as e:
+                        logger.error(f"Error updating upload progress: {e}")
             
-            await progress_msg.edit_text(
-                f"📤 **Uploading video...**\n"
-                f"📦 {output_size/1024/1024:.1f}MB",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
+            # Send video to user
             await self.file_handler.send_video_to_user(
                 chat_id=user_id,
                 video_path=output_path,
