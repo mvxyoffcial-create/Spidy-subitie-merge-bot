@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    container_name: subtitle-bot
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - MAX_FILE_SIZE=2147483648  # 2GB in bytes
+      - TEMP_DIR=/app/temp
+    volumes:
+      - ./temp:/app/temp
+      - ./input:/app/input
+      - ./output:/app/output
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
