@@ -1,10 +1,9 @@
 import time
 import asyncio
-from typing import Optional, Callable, Awaitable
-from datetime import datetime
+from typing import Optional, Callable
 
 class ProgressManager:
-    def __init__(self, total_size: int, job_id: str):
+    def __init__(self, total_size: int, job_id: str, operation: str = "Processing"):
         self.job_id = job_id
         self.total_size = total_size
         self.processed_size = 0
@@ -12,14 +11,19 @@ class ProgressManager:
         self.last_update = 0
         self.update_interval = 1.0
         self.status = "initializing"
-        self.current_stage = "Initializing"
+        self.current_stage = operation
         self.error_message = None
         self.is_complete = False
+        self.operation = operation
         
         # Track processing metrics
         self.estimated_speed = 0
         self.speed_samples = []
         self.max_samples = 10
+        
+        # For speed calculation
+        self.last_size = 0
+        self.last_time = time.time()
         
         # Callback for progress updates
         self.callback = None
@@ -76,46 +80,72 @@ class ProgressManager:
         
         return int(remaining_mb / self.estimated_speed)
     
-    def get_progress_bar(self, width: int = 25) -> str:
-        """Generate progress bar string"""
+    def get_progress_bar(self, width: int = 20) -> str:
+        """Generate progress bar string with blocks"""
         percentage = self.get_percentage()
         filled = int(width * percentage / 100)
         bar = '█' * filled + '░' * (width - filled)
-        return f"`[{bar}]`"
+        return bar
     
-    def get_status_message(self) -> str:
-        """Get complete status message"""
+    def get_progress_text(self) -> str:
+        """Get complete progress status message like the screenshot"""
         percentage = self.get_percentage()
-        bar = self.get_progress_bar()
+        bar = self.get_progress_bar(20)
         speed = self.estimated_speed or self.get_speed()
         eta = self.get_eta()
+        elapsed = self.get_elapsed_time()
         
-        status = f"📊 **Processing: {self.current_stage}**\n\n"
-        status += f"{bar} **{percentage}%**\n\n"
+        # Format sizes
+        processed_mb = self.processed_size / 1024 / 1024
+        total_mb = self.total_size / 1024 / 1024
+        processed_str = self.format_size(self.processed_size)
+        total_str = self.format_size(self.total_size)
+        
+        # Build status message
+        status = f"📊 **Task Running:** {self.current_stage}\n\n"
+        status += f"**1. Download:**\n"
+        status += f"[ ] {percentage}%\n"
+        status += f"`{bar}`\n\n"
+        status += f"**Processed:** {processed_str}\n"
+        status += f"**Size:** {total_str}\n"
         
         if speed > 0:
-            status += f"⚡ **Speed:** {speed:.1f} MB/s\n"
+            status += f"**Speed:** {speed:.1f} MB/s\n"
         else:
-            status += f"⚡ **Speed:** Calculating...\n"
+            status += f"**Speed:** 0 B/s\n"
         
         if eta is not None and eta > 0:
             minutes = eta // 60
             seconds = eta % 60
-            status += f"⏱️ **ETA:** {minutes:02d}:{seconds:02d}"
+            status += f"**ETA:** {minutes:02d}:{seconds:02d}\n"
         elif eta == 0:
-            status += f"⏱️ **ETA:** Almost done!"
+            status += f"**ETA:** -\n"
         else:
-            status += f"⏱️ **ETA:** Calculating..."
+            status += f"**ETA:** Calculating...\n"
         
-        # Add file size info
-        processed_mb = self.processed_size / 1024 / 1024
-        total_mb = self.total_size / 1024 / 1024
-        status += f"\n📦 **Size:** {processed_mb:.1f}MB / {total_mb:.1f}MB"
+        status += f"**Elapsed:** {elapsed}\n"
+        status += f"**Upload:** Telegram\n"
+        status += f"**Engine:** TDLib v1.8.66"
         
         if self.error_message:
             status += f"\n\n❌ **Error:** {self.error_message}"
         
         return status
+    
+    def format_size(self, size_bytes: int) -> str:
+        """Format file size in human readable format"""
+        if size_bytes >= 1024 * 1024 * 1024:
+            return f"{size_bytes / 1024 / 1024 / 1024:.2f} GB"
+        elif size_bytes >= 1024 * 1024:
+            return f"{size_bytes / 1024 / 1024:.1f} MB"
+        elif size_bytes >= 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes} B"
+    
+    def get_status_message(self) -> str:
+        """Get complete status message"""
+        return self.get_progress_text()
     
     def set_stage(self, stage: str):
         """Update current processing stage"""
