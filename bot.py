@@ -48,7 +48,7 @@ class SubtitleBot:
             "🎬 **Welcome to the Subtitle Burner Bot!**\n\n"
             "I can permanently burn subtitles into your videos with ultra-fast processing.\n\n"
             "**📤 How to use:**\n"
-            "1️⃣ Send me a **video file** (up to 2GB)\n"
+            "1️⃣ Send me a **video file** (MP4, MKV, AVI, etc. - up to 2GB)\n"
             "2️⃣ Then send me a **subtitle file** (.srt, .ass, .ssa, .vtt)\n"
             "3️⃣ I'll burn the subtitles and send you the processed video\n\n"
             "⚡ **Features:**\n"
@@ -71,7 +71,7 @@ class SubtitleBot:
         help_text = (
             "📖 **How to use the Subtitle Bot**\n\n"
             "**Step-by-Step:**\n"
-            "1️⃣ Send a **video file** (mp4, avi, mkv, mov, etc.)\n"
+            "1️⃣ Send a **video file** (mp4, mkv, avi, mov, etc.)\n"
             "2️⃣ Send a **subtitle file** (.srt, .ass, .ssa, .vtt)\n"
             "3️⃣ Wait for processing (progress shown in real-time)\n"
             "4️⃣ Receive your video with hard-burned subtitles!\n\n"
@@ -88,7 +88,7 @@ class SubtitleBot:
             "/status - Check bot status\n"
             "/cancel - Cancel current operation\n\n"
             "**📝 Supported formats:**\n"
-            "• Videos: MP4, AVI, MKV, MOV, FLV, WEBM\n"
+            "• Videos: MP4, MKV, AVI, MOV, FLV, WEBM, M4V, WMV, MPG\n"
             "• Subtitles: SRT, ASS, SSA, VTT, SUB"
         )
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -127,16 +127,62 @@ class SubtitleBot:
         else:
             await update.message.reply_text("ℹ️ No active operation to cancel.")
     
-    async def handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle video file upload with progress."""
+    async def handle_video_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle any video file (both video and document with video extension)."""
         user_id = update.effective_user.id
         user_data = self.user_data.get(user_id, {})
         
-        # Check file size
-        video = update.message.video
+        # Check if it's a video message or document
+        video = None
+        file_name = None
+        file_size = 0
         
-        if video.file_size > self.config.MAX_FILE_SIZE:
-            file_size_gb = video.file_size / 1024 / 1024 / 1024
+        if update.message.video:
+            # Regular video message
+            video = update.message.video
+            file_name = video.file_name or f"video_{user_id}_{int(datetime.now().timestamp())}.mp4"
+            file_size = video.file_size
+            file_id = video.file_id
+            
+        elif update.message.document:
+            # Document that might be a video
+            document = update.message.document
+            file_name = document.file_name or ''
+            file_ext = Path(file_name).suffix.lower()
+            
+            # Check if it's a video format
+            if file_ext in self.config.SUPPORTED_VIDEO_FORMATS:
+                video = document
+                file_size = document.file_size
+                file_id = document.file_id
+            else:
+                # If it's not a video format, it might be a subtitle
+                if file_ext in self.config.SUPPORTED_SUB_FORMATS:
+                    # Let the document handler handle it
+                    return await self.handle_document(update, context)
+                else:
+                    await update.message.reply_text(
+                        f"❌ **Unsupported file format!**\n\n"
+                        f"📝 Your file: `{file_name}`\n"
+                        f"❌ Extension: `{file_ext}`\n\n"
+                        f"**Supported video formats:**\n"
+                        f"• {', '.join(self.config.SUPPORTED_VIDEO_FORMATS)}\n\n"
+                        f"**Supported subtitle formats:**\n"
+                        f"• {', '.join(self.config.SUPPORTED_SUB_FORMATS)}"
+                    )
+                    return
+        else:
+            # Not a video or document
+            await update.message.reply_text(
+                "❌ **Please send a video file!**\n\n"
+                "Send a video file (MP4, MKV, AVI, etc.) first.\n"
+                "Then send the subtitle file."
+            )
+            return
+        
+        # Check file size (up to 2GB)
+        if file_size > self.config.MAX_FILE_SIZE:
+            file_size_gb = file_size / 1024 / 1024 / 1024
             await update.message.reply_text(
                 f"❌ **File too large!**\n\n"
                 f"📦 Your file: {file_size_gb:.2f}GB\n"
@@ -145,44 +191,33 @@ class SubtitleBot:
             )
             return
         
-        # Check video duration
-        if video.duration and video.duration > self.config.MAX_VIDEO_DURATION:
-            minutes = video.duration // 60
-            await update.message.reply_text(
-                f"❌ **Video too long!**\n\n"
-                f"⏱️ Your video: {minutes} minutes\n"
-                f"🚫 Maximum allowed: 2 hours\n\n"
-                "Please send a shorter video."
-            )
-            return
-        
         # Store video info
         user_data['video_file'] = video
-        user_data['video_file_id'] = video.file_id
-        user_data['video_name'] = video.file_name or f"video_{user_id}_{int(datetime.now().timestamp())}.mp4"
-        user_data['video_size'] = video.file_size
+        user_data['video_file_id'] = file_id
+        user_data['video_name'] = file_name
+        user_data['video_size'] = file_size
         
         self.user_data[user_id] = user_data
         
         # Send confirmation
         await update.message.reply_text(
             f"✅ **Video received!**\n\n"
-            f"📹 File: `{user_data['video_name']}`\n"
-            f"📦 Size: {video.file_size / 1024 / 1024:.1f}MB\n"
-            f"⏱️ Duration: {video.duration // 60}:{video.duration % 60:02d}\n\n"
+            f"📹 File: `{file_name}`\n"
+            f"📦 Size: {file_size / 1024 / 1024:.1f}MB\n\n"
             "📝 Now send me the **subtitle file**\n"
-            "Supported formats: .srt, .ass, .ssa, .vtt"
+            "Supported formats: .srt, .ass, .ssa, .vtt\n\n"
+            "⚠️ **Note:** Send the subtitle file as a document (not as text)."
         )
     
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle document file upload (subtitles) with 2GB support."""
+        """Handle document file upload (subtitles)."""
         user_id = update.effective_user.id
         
         # Check if video was uploaded
         if user_id not in self.user_data or 'video_file' not in self.user_data[user_id]:
             await update.message.reply_text(
                 "❌ **Please send a video first!**\n\n"
-                "1️⃣ Send a video file\n"
+                "1️⃣ Send a video file (MP4, MKV, AVI, etc.)\n"
                 "2️⃣ Then send the subtitle file\n\n"
                 "This ensures I can process your file correctly."
             )
@@ -197,19 +232,24 @@ class SubtitleBot:
         file_name = document.file_name or ''
         file_ext = Path(file_name).suffix.lower()
         
+        # Check if it's a video file (in case user sends video as document)
+        if file_ext in self.config.SUPPORTED_VIDEO_FORMATS:
+            # Handle as video
+            return await self.handle_video_file(update, context)
+        
         # Check subtitle format
         if file_ext not in self.config.SUPPORTED_SUB_FORMATS:
             await update.message.reply_text(
                 f"❌ **Unsupported subtitle format!**\n\n"
                 f"📝 Your file: `{file_name}`\n"
                 f"❌ Extension: `{file_ext}`\n\n"
-                f"**Supported formats:**\n"
+                f"**Supported subtitle formats:**\n"
                 f"• {', '.join(self.config.SUPPORTED_SUB_FORMATS)}\n\n"
                 "Please send a supported subtitle file."
             )
             return
         
-        # Check subtitle file size
+        # Check subtitle file size (max 50MB for subtitles)
         if document.file_size > self.config.MAX_SUBTITLE_SIZE:
             await update.message.reply_text(
                 f"❌ **Subtitle file too large!**\n\n"
@@ -223,6 +263,7 @@ class SubtitleBot:
         user_data = self.user_data[user_id]
         video_file = user_data['video_file']
         video_name = user_data['video_name']
+        video_file_id = user_data['video_file_id']
         
         # Send processing message
         progress_message = await update.message.reply_text(
@@ -239,34 +280,45 @@ class SubtitleBot:
             # Initialize file handler
             await self.file_handler.start()
             
-            # Download video with progress
-            video_path = os.path.join(job_dir, video_name)
+            # Determine video file extension from original file
+            video_ext = Path(video_name).suffix.lower()
+            if not video_ext or video_ext not in self.config.SUPPORTED_VIDEO_FORMATS:
+                video_ext = '.mp4'  # Default to mp4 if unknown
+            
+            video_path = os.path.join(job_dir, f"video_{user_id}{video_ext}")
             subtitle_path = os.path.join(job_dir, file_name)
             
-            # Define progress callback for download
+            # Download video with progress
             async def download_progress(current, total):
                 percentage = int((current / total) * 100)
-                if percentage % 10 == 0:  # Update every 10%
-                    await progress_message.edit_text(
-                        f"📥 **Downloading video...**\n\n"
-                        f"📊 Progress: {percentage}%\n"
-                        f"📦 {current / 1024 / 1024:.1f}MB / {total / 1024 / 1024:.1f}MB",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                if percentage % 10 == 0:
+                    try:
+                        await progress_message.edit_text(
+                            f"📥 **Downloading video...**\n\n"
+                            f"📊 Progress: {percentage}%\n"
+                            f"📦 {current / 1024 / 1024:.1f}MB / {total / 1024 / 1024:.1f}MB",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except:
+                        pass
             
-            # Download video using Pyrogram (supports 2GB)
             await progress_message.edit_text(
                 f"📥 **Downloading video file...**\n"
-                f"📦 Size: {video_file.file_size / 1024 / 1024:.1f}MB\n\n"
+                f"📦 Size: {user_data['video_size'] / 1024 / 1024:.1f}MB\n\n"
                 "⏳ Using Telegram API for large file support...",
                 parse_mode=ParseMode.MARKDOWN
             )
             
+            # Download video using Pyrogram
             await self.file_handler.download_file(
-                video_file.file_id,
+                video_file_id,
                 video_path,
                 download_progress
             )
+            
+            # Verify video was downloaded
+            if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+                raise Exception("Video download failed - file is empty or missing")
             
             # Download subtitle
             await progress_message.edit_text(
@@ -279,6 +331,10 @@ class SubtitleBot:
                 document.file_id,
                 subtitle_path
             )
+            
+            # Verify subtitle was downloaded
+            if not os.path.exists(subtitle_path) or os.path.getsize(subtitle_path) == 0:
+                raise Exception("Subtitle download failed - file is empty or missing")
             
             # Process video with subtitles
             await progress_message.edit_text(
@@ -330,15 +386,17 @@ class SubtitleBot:
             # Define upload progress callback
             async def upload_progress(current, total):
                 percentage = int((current / total) * 100)
-                if percentage % 10 == 0:  # Update every 10%
-                    await progress_message.edit_text(
-                        f"📤 **Uploading video...**\n\n"
-                        f"📊 Progress: {percentage}%\n"
-                        f"📦 {current / 1024 / 1024:.1f}MB / {total / 1024 / 1024:.1f}MB",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                if percentage % 10 == 0:
+                    try:
+                        await progress_message.edit_text(
+                            f"📤 **Uploading video...**\n\n"
+                            f"📊 Progress: {percentage}%\n"
+                            f"📦 {current / 1024 / 1024:.1f}MB / {total / 1024 / 1024:.1f}MB",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except:
+                        pass
             
-            # Upload using Pyrogram for 2GB support
             await progress_message.edit_text(
                 f"📤 **Uploading video...**\n"
                 f"📦 Size: {output_size / 1024 / 1024:.1f}MB\n\n"
@@ -398,15 +456,24 @@ async def main():
     application.add_handler(CommandHandler("status", bot.status_command))
     application.add_handler(CommandHandler("cancel", bot.cancel_command))
     
-    # Message handlers
-    application.add_handler(MessageHandler(filters.VIDEO, bot.handle_video))
+    # Message handlers - Note: Order matters!
+    # First check for video messages
+    application.add_handler(MessageHandler(filters.VIDEO, bot.handle_video_file))
+    # Then check for documents (will handle both video docs and subtitles)
     application.add_handler(MessageHandler(filters.Document.ALL, bot.handle_document))
+    # Finally, handle other file types
+    application.add_handler(MessageHandler(filters.ALL, 
+        lambda update, context: update.message.reply_text(
+            "❌ **Unsupported file type!**\n\n"
+            "Please send:\n"
+            "1️⃣ A **video file** (MP4, MKV, AVI, etc.)\n"
+            "2️⃣ Then a **subtitle file** (.srt, .ass, .ssa, .vtt)\n\n"
+            "Or use /help for more information."
+        )
+    ))
     
     # Start the bot
     print("🚀 Starting bot...")
-    print(f"📝 Bot Token: {Config.BOT_TOKEN[:10]}...")
-    print(f"📡 API ID: {Config.API_ID}")
-    print(f"📦 Max File Size: 2GB")
     print("✅ Bot is running!")
     
     await application.initialize()
