@@ -63,7 +63,7 @@ class SubtitleProcessor:
         total_size = video_size + subtitle_size
         
         # Create progress manager
-        progress = ProgressManager(total_size, job_id)
+        progress = ProgressManager(total_size, job_id, "Burning Subtitles")
         self.active_jobs[job_id] = progress
         
         try:
@@ -104,14 +104,9 @@ class SubtitleProcessor:
             raise Exception(f"Error reading subtitle file: {e}")
         
         # For SRT files, we need to handle them properly
-        # Try to use the subtitles filter with proper escaping
         subtitle_path_escaped = subtitle_path.replace("'", "'\\''")
         
-        # Different approaches for different subtitle formats
-        subtitle_ext = Path(subtitle_path).suffix.lower()
-        
         # Build FFmpeg command - using simpler filter first
-        # Try with direct subtitle filter
         cmd = [
             'ffmpeg',
             '-i', video_path,
@@ -121,6 +116,8 @@ class SubtitleProcessor:
             '-crf', '23',
             '-c:a', 'copy',
             '-movflags', '+faststart',
+            '-progress', 'pipe:1',
+            '-stats',
             '-y',
             output_path
         ]
@@ -154,10 +151,6 @@ class SubtitleProcessor:
             line_str = line.decode('utf-8', errors='ignore').strip()
             stderr_lines.append(line_str)
             
-            # Print debug info (only important lines)
-            if any(keyword in line_str for keyword in ['out_time=', 'frame=', 'error', 'failed']):
-                print(f"FFmpeg: {line_str}")
-            
             # Parse FFmpeg progress
             if 'out_time=' in line_str:
                 try:
@@ -174,6 +167,7 @@ class SubtitleProcessor:
                                 progress_percent = min(100, int((current_time / total_duration) * 100))
                                 
                                 if progress_percent > last_progress:
+                                    # Simulate progress update
                                     bytes_processed = int((progress_percent - last_progress) / 100 * progress.total_size)
                                     await progress.update(max(1024*1024, bytes_processed), "Encoding video")
                                     last_progress = progress_percent
@@ -193,7 +187,7 @@ class SubtitleProcessor:
             print(f"❌ FFmpeg failed with return code: {process.returncode}")
             print(f"Stderr output: {stderr_text[:500]}")
             
-            # Try alternative approach - use subtitle filter with different syntax
+            # Try alternative approach
             print("🔄 Trying alternative FFmpeg command...")
             await self._run_ffmpeg_alternative(video_path, subtitle_path, output_path, progress)
             return
@@ -237,7 +231,10 @@ class SubtitleProcessor:
                 break
             line_str = line.decode('utf-8', errors='ignore').strip()
             stderr_lines.append(line_str)
-            print(f"FFmpeg-alt: {line_str}")
+            
+            # Update progress during alternative encoding
+            if 'frame=' in line_str:
+                await progress.update(1024*1024, "Alternative encoding")
         
         await process.wait()
         
