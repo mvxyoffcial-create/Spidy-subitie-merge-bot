@@ -1,28 +1,21 @@
 version: '3.8'
 
 services:
-  telegram-bot:
-    build: 
-      context: .
-      dockerfile: Dockerfile
-    container_name: subtitle-bot
+  bot:
+    build: .
+    container_name: hardsub-bot
     environment:
-      - PYTHONUNBUFFERED=1
-      - FFMPEG_THREADS=4
+      - PORT=8000
     volumes:
       - ./temp:/app/temp
+      - ./output:/app/output
       - ./sessions:/app/sessions
+    ports:
+      - "8000:8000"
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 6G
+          memory: 4G
         reservations:
-          cpus: '2'
           memory: 2G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
