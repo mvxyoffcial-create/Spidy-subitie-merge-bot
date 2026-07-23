@@ -1,40 +1,36 @@
+#!/bin/bash
+
+# Create a working Dockerfile
+cat > Dockerfile << 'EOF'
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install FFmpeg and all dependencies with full codec support
+# Install FFmpeg
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    libavcodec-extra \
-    libavformat-extra \
-    libavfilter-extra \
-    libavdevice-extra \
-    libavutil-extra \
-    libpostproc-extra \
-    libswresample-extra \
-    libswscale-extra \
-    wget \
-    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Verify FFmpeg installation
-RUN ffmpeg -version && echo "✅ FFmpeg installed successfully"
+# Verify FFmpeg
+RUN ffmpeg -version
 
-# Copy requirements first for better caching
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy code
 COPY . .
 
-# Create necessary directories
+# Create directories
 RUN mkdir -p temp/input temp/output temp/cache sessions
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV FFMPEG_THREADS=4
-
-# Run the bot
+# Run
 CMD ["python", "bot.py"]
+EOF
+
+# Deploy
+git add Dockerfile
+git commit -m "Fix Dockerfile - remove invalid packages"
+git push
