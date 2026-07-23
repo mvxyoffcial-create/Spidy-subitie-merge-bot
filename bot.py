@@ -41,17 +41,11 @@ class SubtitleBot:
         welcome_message = (
             f"👋 **Hello {user.first_name}!**\n\n"
             "🎬 **Welcome to the Subtitle Burner Bot!**\n\n"
-            "I can permanently burn subtitles into your videos with ultra-fast processing.\n\n"
+            "I can permanently burn subtitles into your videos.\n\n"
             "**📤 How to use:**\n"
             "1️⃣ Send me a **video file** (MP4, MKV, AVI, etc. - up to 2GB)\n"
             "2️⃣ Then send me a **subtitle file** (.srt, .ass, .ssa, .vtt)\n"
             "3️⃣ I'll burn the subtitles and send you the processed video\n\n"
-            "⚡ **Features:**\n"
-            "• 🚀 Ultra-fast processing with FFmpeg\n"
-            "• 📊 Real-time progress updates\n"
-            "• 🌍 Supports all languages (Unicode)\n"
-            "• 💾 Permanent hard-burned subtitles\n"
-            "• 📦 Supports files up to 2GB\n\n"
             f"📊 **System:** {self.system_info['cpu_count']} cores, {self.system_info['available_memory']:.1f}GB RAM\n\n"
             "Send a video to get started! 🚀"
         )
@@ -128,7 +122,6 @@ class SubtitleBot:
                 detected = True
                 logger.info(f"🎬 Document recognized as video: {file_name}")
             else:
-                # Not a video, maybe subtitle
                 if doc_ext in self.config.SUPPORTED_SUB_FORMATS:
                     return await self.handle_subtitle_input(update, context)
                 else:
@@ -191,7 +184,7 @@ class SubtitleBot:
         file_name = doc.file_name or ""
         file_ext = Path(file_name).suffix.lower()
         
-        # Check if it's a video document (in case user sends video again)
+        # Check if it's a video document
         if file_ext in self.config.SUPPORTED_VIDEO_FORMATS or (doc.mime_type and doc.mime_type.startswith('video/')):
             return await self.handle_video_input(update, context)
         
@@ -237,7 +230,7 @@ class SubtitleBot:
             
             # Download video
             async def dl_progress(curr, total):
-                pct = int((curr/total)*100)
+                pct = int((curr/total)*100) if total > 0 else 0
                 if pct % 10 == 0:
                     try:
                         await progress_msg.edit_text(
@@ -300,7 +293,7 @@ class SubtitleBot:
             output_size = os.path.getsize(output_path)
             
             async def up_progress(curr, total):
-                pct = int((curr/total)*100)
+                pct = int((curr/total)*100) if total > 0 else 0
                 if pct % 10 == 0:
                     try:
                         await progress_msg.edit_text(
@@ -342,28 +335,16 @@ class SubtitleBot:
             error_msg = str(e)
             logger.error(f"Processing error: {error_msg}")
             
-            # Get more details from the error
-            if "FFmpeg encoding failed" in error_msg:
-                # Try to get more details from the error
-                error_parts = error_msg.split('\n')
-                formatted_error = "\n".join(error_parts[:3])  # Show first 3 lines
-                await progress_msg.edit_text(
-                    f"❌ **FFmpeg Error:**\n\n"
-                    f"`{formatted_error}`\n\n"
-                    f"Possible issues:\n"
-                    f"• Video file might be corrupted\n"
-                    f"• Subtitle format might be incompatible\n"
-                    f"• Try converting video to MP4 first\n\n"
-                    f"Please try again with a different file.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await progress_msg.edit_text(
-                    f"❌ **Error:**\n\n"
-                    f"`{error_msg[:200]}`\n\n"
-                    f"Please try again with a different file.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+            await progress_msg.edit_text(
+                f"❌ **Error:**\n\n"
+                f"`{error_msg[:300]}`\n\n"
+                f"**Tips:**\n"
+                f"• Make sure your video file is not corrupted\n"
+                f"• Try using .srt subtitle format\n"
+                f"• Try converting video to MP4 first\n"
+                f"• Make sure subtitle has correct timing",
+                parse_mode=ParseMode.MARKDOWN
+            )
             
             await self.processor.cleanup(job_dir)
             self.user_data.pop(user_id, None)
@@ -377,7 +358,6 @@ async def main():
     app.add_handler(CommandHandler("status", bot.status_command))
     app.add_handler(CommandHandler("cancel", bot.cancel_command))
     
-    # Main handlers
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, bot.handle_video_input))
     
     print("🚀 Bot started!")
