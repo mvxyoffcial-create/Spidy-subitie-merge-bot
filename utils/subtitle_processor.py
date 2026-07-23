@@ -93,38 +93,34 @@ class SubtitleProcessor:
         """
         progress.set_stage("Preparing FFmpeg")
         
-        # Fix subtitle path for FFmpeg (escape special characters)
+        # Read subtitle content to check if it's valid
+        try:
+            with open(subtitle_path, 'r', encoding='utf-8') as f:
+                sub_content = f.read()
+                if not sub_content.strip():
+                    raise Exception("Subtitle file is empty")
+                print(f"📝 Subtitle file size: {len(sub_content)} characters")
+        except Exception as e:
+            raise Exception(f"Error reading subtitle file: {e}")
+        
+        # For SRT files, we need to handle them properly
+        # Try to use the subtitles filter with proper escaping
         subtitle_path_escaped = subtitle_path.replace("'", "'\\''")
         
-        # Prepare subtitle filter with better styling
-        subtitle_filter = (
-            f"subtitles='{subtitle_path_escaped}':"
-            f"force_style='Fontsize=22,"
-            f"OutlineColour=&H80000000,"
-            f"BorderStyle=4,"
-            f"Outline=2,"
-            f"Shadow=1,"
-            f"MarginV=30,"
-            f"FontName=Arial,"
-            f"PrimaryColour=&H00FFFFFF,"
-            f"SecondaryColour=&H00FFFF00,"
-            f"FontBold=1'"
-        )
+        # Different approaches for different subtitle formats
+        subtitle_ext = Path(subtitle_path).suffix.lower()
         
-        # Build FFmpeg command for ultra-fast processing
+        # Build FFmpeg command - using simpler filter first
+        # Try with direct subtitle filter
         cmd = [
             'ffmpeg',
             '-i', video_path,
-            '-vf', subtitle_filter,
+            '-vf', f"subtitles={subtitle_path_escaped}",
             '-c:v', 'libx264',
-            '-preset', self.config.ENCODING_PRESET,
-            '-threads', str(self.config.FFMPEG_THREADS),
+            '-preset', 'ultrafast',
             '-crf', '23',
-            '-c:a', 'aac',
-            '-b:a', '128k',
+            '-c:a', 'copy',
             '-movflags', '+faststart',
-            '-progress', 'pipe:1',
-            '-stats',
             '-y',
             output_path
         ]
@@ -135,10 +131,6 @@ class SubtitleProcessor:
         progress.set_stage("Encoding video")
         await progress.update(0, "Encoding video")
         
-        # Get total duration for accurate progress
-        total_duration = await self._get_video_duration(video_path)
-        print(f"📹 Video duration: {total_duration} seconds")
-        
         # Start FFmpeg process
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -146,13 +138,15 @@ class SubtitleProcessor:
             stderr=asyncio.subprocess.PIPE
         )
         
-        last_progress = 0
+        # Get total duration for accurate progress
+        total_duration = await self._get_video_duration(video_path)
+        print(f"📹 Video duration: {total_duration} seconds")
         
-        # Read progress from FFmpeg output
+        last_progress = 0
         stderr_lines = []
         
+        # Read progress from FFmpeg output
         while True:
-            # Read stderr for progress
             line = await process.stderr.readline()
             if not line:
                 break
@@ -160,15 +154,15 @@ class SubtitleProcessor:
             line_str = line.decode('utf-8', errors='ignore').strip()
             stderr_lines.append(line_str)
             
-            # Print debug info
-            print(f"FFmpeg: {line_str}")
+            # Print debug info (only important lines)
+            if any(keyword in line_str for keyword in ['out_time=', 'frame=', 'error', 'failed']):
+                print(f"FFmpeg: {line_str}")
             
             # Parse FFmpeg progress
             if 'out_time=' in line_str:
                 try:
                     time_str = line_str.split('=')[1].strip()
                     if ':' in time_str:
-                        # Parse time in HH:MM:SS.milliseconds format
                         parts = time_str.split(':')
                         if len(parts) == 3:
                             hours = float(parts[0])
@@ -179,13 +173,12 @@ class SubtitleProcessor:
                             if total_duration > 0:
                                 progress_percent = min(100, int((current_time / total_duration) * 100))
                                 
-                                # Update progress based on video processing
                                 if progress_percent > last_progress:
                                     bytes_processed = int((progress_percent - last_progress) / 100 * progress.total_size)
-                                    await progress.update(bytes_processed, "Encoding video")
+                                    await progress.update(max(1024*1024, bytes_processed), "Encoding video")
                                     last_progress = progress_percent
                 except Exception as e:
-                    print(f"Error parsing time: {e}")
+                    pass
             
             # Check for errors
             if 'error' in line_str.lower() or 'failed' in line_str.lower():
@@ -196,24 +189,65 @@ class SubtitleProcessor:
         
         # Check if FFmpeg failed
         if process.returncode != 0:
-            # Get stderr output
             stderr_text = '\n'.join(stderr_lines)
             print(f"❌ FFmpeg failed with return code: {process.returncode}")
-            print(f"Stderr output: {stderr_text}")
+            print(f"Stderr output: {stderr_text[:500]}")
             
-            # Check for specific errors
-            if 'Permission denied' in stderr_text:
-                raise Exception(f"FFmpeg permission error: {stderr_text[:200]}")
-            elif 'No such file' in stderr_text:
-                raise Exception(f"FFmpeg file not found: {stderr_text[:200]}")
-            elif 'Invalid argument' in stderr_text:
-                raise Exception(f"FFmpeg invalid argument: {stderr_text[:200]}")
-            else:
-                raise Exception(f"FFmpeg encoding failed:\n{stderr_text[:500]}")
+            # Try alternative approach - use subtitle filter with different syntax
+            print("🔄 Trying alternative FFmpeg command...")
+            await self._run_ffmpeg_alternative(video_path, subtitle_path, output_path, progress)
+            return
         
         # Ensure progress is at 100%
         progress.complete()
         print("✅ FFmpeg encoding completed successfully")
+    
+    async def _run_ffmpeg_alternative(self, video_path: str, subtitle_path: str, 
+                                      output_path: str, progress: ProgressManager):
+        """
+        Alternative FFmpeg command with different subtitle handling
+        """
+        progress.set_stage("Trying alternative encoding")
+        
+        # Different approach: copy video stream and add subtitles
+        cmd = [
+            'ffmpeg',
+            '-i', video_path,
+            '-i', subtitle_path,
+            '-c:v', 'copy',
+            '-c:a', 'copy',
+            '-c:s', 'mov_text',
+            '-metadata:s:s:0', 'language=eng',
+            '-y',
+            output_path
+        ]
+        
+        print(f"🎬 Alternative FFmpeg command: {' '.join(cmd)}")
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stderr_lines = []
+        while True:
+            line = await process.stderr.readline()
+            if not line:
+                break
+            line_str = line.decode('utf-8', errors='ignore').strip()
+            stderr_lines.append(line_str)
+            print(f"FFmpeg-alt: {line_str}")
+        
+        await process.wait()
+        
+        if process.returncode != 0:
+            stderr_text = '\n'.join(stderr_lines)
+            raise Exception(f"Alternative FFmpeg encoding failed:\n{stderr_text[:500]}")
+        
+        # If alternative worked, we're done
+        progress.complete()
+        print("✅ Alternative FFmpeg encoding completed successfully")
     
     async def _get_video_duration(self, video_path: str) -> float:
         """Get video duration in seconds using FFprobe"""
