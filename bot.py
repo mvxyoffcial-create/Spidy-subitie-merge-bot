@@ -87,14 +87,8 @@ class SubtitleBot:
         else:
             await update.message.reply_text("ℹ️ No active operation.")
     
-    # ========================
-    # NEW: Universal video handler
-    # ========================
     async def handle_video_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handles both video messages and document messages that are actually videos.
-        Detects by mime_type and file extension.
-        """
+        """Handles both video messages and document messages that are actually videos."""
         user_id = update.effective_user.id
         user_data = self.user_data.get(user_id, {})
         
@@ -116,7 +110,6 @@ class SubtitleBot:
         # 2. Check if it's a document
         elif update.message.document:
             doc = update.message.document
-            # Get file name and extension
             doc_name = doc.file_name or ""
             doc_ext = Path(doc_name).suffix.lower()
             mime = doc.mime_type or ""
@@ -135,9 +128,8 @@ class SubtitleBot:
                 detected = True
                 logger.info(f"🎬 Document recognized as video: {file_name}")
             else:
-                # Not a video, maybe subtitle or something else
+                # Not a video, maybe subtitle
                 if doc_ext in self.config.SUPPORTED_SUB_FORMATS:
-                    # Let subtitle handler process it
                     return await self.handle_subtitle_input(update, context)
                 else:
                     await update.message.reply_text(
@@ -148,7 +140,6 @@ class SubtitleBot:
                     )
                     return
         
-        # If we didn't detect a video
         if not detected:
             await update.message.reply_text(
                 "❌ **Please send a video file!**\n\n"
@@ -180,9 +171,6 @@ class SubtitleBot:
             "⚠️ Send it as a **document** (file attachment)."
         )
     
-    # ========================
-    # Subtitle handler
-    # ========================
     async def handle_subtitle_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
@@ -205,7 +193,6 @@ class SubtitleBot:
         
         # Check if it's a video document (in case user sends video again)
         if file_ext in self.config.SUPPORTED_VIDEO_FORMATS or (doc.mime_type and doc.mime_type.startswith('video/')):
-            # Treat as new video
             return await self.handle_video_input(update, context)
         
         # Check subtitle format
@@ -352,17 +339,35 @@ class SubtitleBot:
             )
             
         except Exception as e:
-            logger.error(f"Processing error: {e}")
-            await progress_msg.edit_text(
-                f"❌ **Error:**\n\n`{str(e)}`\n\nPlease try again.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            error_msg = str(e)
+            logger.error(f"Processing error: {error_msg}")
+            
+            # Get more details from the error
+            if "FFmpeg encoding failed" in error_msg:
+                # Try to get more details from the error
+                error_parts = error_msg.split('\n')
+                formatted_error = "\n".join(error_parts[:3])  # Show first 3 lines
+                await progress_msg.edit_text(
+                    f"❌ **FFmpeg Error:**\n\n"
+                    f"`{formatted_error}`\n\n"
+                    f"Possible issues:\n"
+                    f"• Video file might be corrupted\n"
+                    f"• Subtitle format might be incompatible\n"
+                    f"• Try converting video to MP4 first\n\n"
+                    f"Please try again with a different file.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await progress_msg.edit_text(
+                    f"❌ **Error:**\n\n"
+                    f"`{error_msg[:200]}`\n\n"
+                    f"Please try again with a different file.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            
             await self.processor.cleanup(job_dir)
             self.user_data.pop(user_id, None)
 
-# ========================
-# Main
-# ========================
 async def main():
     bot = SubtitleBot()
     app = Application.builder().token(Config.BOT_TOKEN).build()
@@ -372,34 +377,9 @@ async def main():
     app.add_handler(CommandHandler("status", bot.status_command))
     app.add_handler(CommandHandler("cancel", bot.cancel_command))
     
-    # Main handlers: first catch video messages and documents
+    # Main handlers
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, bot.handle_video_input))
-    # Note: The above will catch all documents, and inside we route to subtitle handler if needed.
-    # But we also need to handle subtitles specifically when they are sent after video.
-    # We'll let the universal handler decide.
     
-    # Actually, we need to differentiate: the universal handler will store video if it's a video.
-    # But if it's a subtitle, we need to call the subtitle handler.
-    # So we use a single entry point that decides.
-    # We can also add a separate handler for subtitles but the order matters.
-    # Let's just keep the universal handler and add a separate handler for documents that are subtitles.
-    # Better: Use a single handler that inspects the document and routes accordingly.
-    # I already implemented handle_video_input which checks if it's a video, if not, it calls handle_subtitle_input.
-    # However, the handler is only for video and documents, but we need to catch all documents.
-    # So we add a separate handler for documents that are not videos? But then the universal handler might miss.
-    # Let's use a single handler for all messages that are video or document.
-    # The handle_video_input function already does the routing.
-    # But we have to ensure it's called for all video and document messages.
-    
-    # Remove previous handler and use a single handler for videos and documents.
-    # However, we already have handle_video_input which handles both.
-    # Let's just use that.
-    
-    # But we need to handle the case where user sends a subtitle after video.
-    # The subtitle will be a document, and handle_video_input will see it's not a video and call handle_subtitle_input.
-    # So it works.
-    
-    # Start polling
     print("🚀 Bot started!")
     await app.initialize()
     await app.start()
